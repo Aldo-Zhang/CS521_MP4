@@ -18,13 +18,12 @@ from torch.ao.quantization import (
 )
 from torch.ao.quantization.observer import MinMaxObserver
 
-# Add the directory that contains resnet_torch.py to the Python path
-BASE_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "CS521-Spring2024-rsmooth-assignment"
-)
-sys.path.append(BASE_DIR)
+# Path to the assignment folder that contains resnet_torch.py and the weights
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ASSIGN_DIR = os.path.join(PROJECT_ROOT, "CS521-Spring2024-rsmooth-assignment")
 
+# So we can import resnet_torch
+sys.path.append(ASSIGN_DIR)
 
 # -----------------------------
 # Utility functions
@@ -165,11 +164,8 @@ def main():
     #    (adjust import / constructor here if your resnet_torch is different)
     from resnet_torch import ResNet18
 
-    model_fp32 = ResNet18()
-    ckpt_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "resnet18_cifar10.pth",
-    )
+    # checkpoint is inside CS521-Spring2024-rsmooth-assignment
+    ckpt_path = os.path.join(ASSIGN_DIR, "resnet18_cifar10.pth")
     print(f"Loading weights from: {ckpt_path}")
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
