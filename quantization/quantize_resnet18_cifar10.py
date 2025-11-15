@@ -163,9 +163,9 @@ def main():
 
     # 3) Load ResNet18 model + weights
     #    (adjust import / constructor here if your resnet_torch is different)
-    from resnet_torch import resnet18
+    from resnet_torch import ResNet18
 
-    model_fp32 = resnet18(num_classes=10)
+    model_fp32 = ResNet18(num_classes=10)
     ckpt_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "resnet18_cifar10.pth",
