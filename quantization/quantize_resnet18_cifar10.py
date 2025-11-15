@@ -17,6 +17,13 @@ from torch.ao.quantization import (
 )
 from torch.ao.quantization.observer import MinMaxObserver
 
+# Add the directory that contains resnet_torch.py to the Python path
+BASE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "CS521-Spring2024-rsmooth-assignment"
+)
+sys.path.append(BASE_DIR)
+
 
 # -----------------------------
 # Utility functions
