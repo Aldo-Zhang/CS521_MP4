@@ -26,23 +26,29 @@ int main() {
             xs[i] = 0.001f * i;
         }
 
+        int repeats = 1000;
+
         // ---- plain ----
         auto t0 = std::chrono::high_resolution_clock::now();
         float acc_plain = 0.0f;
-        for (int i = 0; i < N; ++i) {
-            acc_plain += f_plain(xs[i]);
+        for (int r = 0; r < repeats; ++r) {
+            for (int i = 0; i < N; ++i) {
+                acc_plain += f_plain(xs[i]);
+            }
         }
         auto t1 = std::chrono::high_resolution_clock::now();
 
-        // ---- dual (value + derivative) ----
+        // ---- dual ----
         auto t2 = std::chrono::high_resolution_clock::now();
         float acc_val = 0.0f;
         float acc_der = 0.0f;
-        for (int i = 0; i < N; ++i) {
-            dual_number x(xs[i], 1.0f);
-            dual_number y = f_dual(x);
-            acc_val += y.value();
-            acc_der += y.dual();   // force derivative to actually be computed
+        for (int r = 0; r < repeats; ++r) {
+            for (int i = 0; i < N; ++i) {
+                dual_number x(xs[i], 1.0f);
+                dual_number y = f_dual(x);
+                acc_val += y.value();
+                acc_der += y.dual();   // force derivative to be computed
+            }
         }
         auto t3 = std::chrono::high_resolution_clock::now();
 
