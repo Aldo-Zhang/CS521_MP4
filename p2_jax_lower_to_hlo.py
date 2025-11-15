@@ -13,7 +13,7 @@ x1, x2 = 2.0, 5.0
 
 # ---- Option 1: new API (if available in your JAX) ----
 print("=== HLO for dy_dx1 ===")
-print(jax.jit(dy_dx1).lower(x1, x2).compiler_ir(dialect="hlo").as_text())
+print(jax.jit(dy_dx1).lower(x1, x2).compiler_ir(dialect="hlo"))
 
 print("\n=== HLO for dy_dx2 ===")
-print(jax.jit(dy_dx2).lower(x1, x2).compiler_ir(dialect="hlo").as_text())
+print(jax.jit(dy_dx2).lower(x1, x2).compiler_ir(dialect="hlo"))
