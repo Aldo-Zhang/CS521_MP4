@@ -263,7 +263,7 @@ def main():
                                  max_batches=args.max_test_batches)
     max_k, acc_at_k = find_max_k_for_linear_layers(
         model, testloader, device, orig_acc,
-        max_drop=2.0, max_k=95,
+        max_drop=2.0, max_k=100,
         max_test_batches=args.max_test_batches,
     )
 
@@ -272,8 +272,8 @@ def main():
     print(f"Max k for linear-layer pruning (<=2% drop): {max_k}% "
           f"with accuracy {acc_at_k:.2f}%")
     print("\nLayer-wise 90% pruning accuracies:")
-    for name, acc in layer_accs.items():
-        print(f"  {name:40s} -> {acc:.2f}%")
+    # for name, acc in layer_accs.items():
+        # print(f"  {name:40s} -> {acc:.2f}%")
 
 
 if __name__ == "__main__":
