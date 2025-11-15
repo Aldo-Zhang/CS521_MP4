@@ -177,7 +177,7 @@ def main():
     qmodel_prepared = prepare(qmodel, inplace=False).eval()
 
     # calibration
-    print(f"Calibrating with {args.calib-batches} batches from training set...")
+    print(f"Calibrating with {args.calib_batches} batches from training set...")
     with torch.no_grad():
         for i, (images, _) in enumerate(trainloader):
             qmodel_prepared(images)  # images stay on CPU
