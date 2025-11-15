@@ -253,10 +253,10 @@ def main():
     # 1) report conv/linear layers + params
     report_layer_params(model)
 
-    # 2) prune each layer by 90% and collect accuracies
-    layer_accs = single_layer_pruning_experiment(
-        model, testloader, device, max_test_batches=args.max_test_batches
-    )
+    # # 2) prune each layer by 90% and collect accuracies
+    # layer_accs = single_layer_pruning_experiment(
+    #     model, testloader, device, max_test_batches=args.max_test_batches
+    # )
 
     # 3) search for maximal k for all Linear layers
     orig_acc = evaluate_accuracy(model, testloader, device,
