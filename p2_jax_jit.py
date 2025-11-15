@@ -96,19 +96,19 @@ if __name__ == "__main__":
     # -------------------------
     print("\n=== HLO for g1 pieces (CPU) ===")
     print("HLO for jitted f:")
-    print(jax.jit(f, backend="cpu").lower(x1, x2).compiler_ir(dialect="hlo").as_text())
+    print(jax.jit(f, backend="cpu").lower(x1, x2).compiler_ir(dialect="hlo").as_hlo_text())
 
     print("\nHLO for jitted dy_dx1:")
-    print(jax.jit(dy_dx1, backend="cpu").lower(x1, x2).compiler_ir(dialect="hlo").as_text())
+    print(jax.jit(dy_dx1, backend="cpu").lower(x1, x2).compiler_ir(dialect="hlo").as_hlo_text())
 
     print("\nHLO for jitted dy_dx2:")
-    print(jax.jit(dy_dx2, backend="cpu").lower(x1, x2).compiler_ir(dialect="hlo").as_text())
+    print(jax.jit(dy_dx2, backend="cpu").lower(x1, x2).compiler_ir(dialect="hlo").as_hlo_text())
 
     print("\n=== HLO for g2 (single jit, CPU) ===")
-    g2_cpu_hlo = g2_cpu.lower(x1, x2).compiler_ir(dialect="hlo").as_text()
+    g2_cpu_hlo = g2_cpu.lower(x1, x2).compiler_ir(dialect="hlo").as_hlo_text()
     print(g2_cpu_hlo)
 
     # If you also want GPU HLO, uncomment this block:
     # if g2_gpu is not None:
     #     print("\n=== HLO for g2 (single jit, GPU) ===")
-    #     print(g2_gpu.lower(x1, x2).compiler_ir(dialect='hlo').as_text())
+    #     print(g2_gpu.lower(x1, x2).compiler_ir(dialect='hlo').as_hlo_text())
