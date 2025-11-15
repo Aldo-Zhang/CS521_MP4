@@ -191,7 +191,7 @@ def find_max_k_for_linear_layers(model: nn.Module,
                                  device: torch.device,
                                  orig_acc: float,
                                  max_drop: float = 2.0,
-                                 max_k: int = 95,
+                                 max_k: int = 100,
                                  max_test_batches: int = None) -> Tuple[int, float]:
     """
     Binary search for largest integer k in [0, max_k] such that
