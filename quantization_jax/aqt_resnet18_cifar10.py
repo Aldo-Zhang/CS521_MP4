@@ -299,111 +299,105 @@ def convert_pytorch_weights_to_jax(pytorch_path, jax_model, dummy_input, key):
     # Convert to mutable dict
     params_dict = unfreeze(jax_params)
     
-    # Create mapping from PyTorch names to JAX parameter paths
-    print("Converting weights from PyTorch to JAX format...")
-    
-    # Helper function to convert conv weights
+    # Helper functions for weight conversion
     def convert_conv(pytorch_tensor):
         # PyTorch: (out_channels, in_channels, height, width)
         # JAX: (height, width, in_channels, out_channels)
         return np.transpose(pytorch_tensor.numpy(), (2, 3, 1, 0))
     
-    # Helper function to convert dense weights
     def convert_dense(pytorch_tensor):
         # PyTorch: (out_features, in_features)
         # JAX: (in_features, out_features)
         return np.transpose(pytorch_tensor.numpy(), (1, 0))
     
-    # Helper function to set parameter in nested dict
-    def set_param(params, path, value):
-        """Set parameter value in nested dictionary."""
-        keys = path.split('.')
-        current = params
-        for key in keys[:-1]:
-            if key not in current:
-                current[key] = {}
-            current = current[key]
-        current[keys[-1]] = jnp.array(value)
+    # Build the mapping based on actual Flax parameter structure
+    # The key insight: Flax uses sequential numbering for submodules
+    mapping = {}
     
-    # Map PyTorch layer names to JAX structure
-    pytorch_to_jax_mapping = {
-        # Initial conv layer
-        'conv1.weight': ('Conv_0', 'kernel', convert_conv),
-        'bn1.weight': ('BatchNorm_0', 'scale', lambda x: x.numpy()),
-        'bn1.bias': ('BatchNorm_0', 'bias', lambda x: x.numpy()),
-        'bn1.running_mean': ('BatchNorm_0', 'mean', lambda x: x.numpy()),
-        'bn1.running_var': ('BatchNorm_0', 'var', lambda x: x.numpy()),
-        
-        # Final dense layer
-        'linear.weight': ('Dense_0', 'kernel', convert_dense),
-        'linear.bias': ('Dense_0', 'bias', lambda x: x.numpy()),
-    }
+    # Initial conv + bn
+    mapping['conv1.weight'] = ('params', 'Conv_0', 'kernel', convert_conv)
+    mapping['bn1.weight'] = ('params', 'BatchNorm_0', 'scale', lambda x: x.numpy())
+    mapping['bn1.bias'] = ('params', 'BatchNorm_0', 'bias', lambda x: x.numpy())
+    mapping['bn1.running_mean'] = ('batch_stats', 'BatchNorm_0', 'mean', lambda x: x.numpy())
+    mapping['bn1.running_var'] = ('batch_stats', 'BatchNorm_0', 'var', lambda x: x.numpy())
     
-    # Add layer blocks mapping
-    block_idx = 1  # Start after initial conv/bn
-    for layer_idx in range(1, 5):  # layers 1-4
-        for block_num in range(2):  # 2 blocks per layer
-            pytorch_prefix = f'layer{layer_idx}.{block_num}'
-            jax_prefix = f'BasicBlock_{block_idx}'
+    # Final linear layer
+    mapping['linear.weight'] = ('params', 'Dense_0', 'kernel', convert_dense)
+    mapping['linear.bias'] = ('params', 'Dense_0', 'bias', lambda x: x.numpy())
+    
+    # ResNet blocks
+    block_counter = 0
+    for layer_idx in range(1, 5):
+        for block_idx in range(2):
+            block_name = f'BasicBlock_{block_counter}'
             
-            # Conv layers in block
-            pytorch_to_jax_mapping.update({
-                f'{pytorch_prefix}.conv1.weight': (f'{jax_prefix}', 'Conv_0', 'kernel', convert_conv),
-                f'{pytorch_prefix}.bn1.weight': (f'{jax_prefix}', 'BatchNorm_0', 'scale', lambda x: x.numpy()),
-                f'{pytorch_prefix}.bn1.bias': (f'{jax_prefix}', 'BatchNorm_0', 'bias', lambda x: x.numpy()),
-                f'{pytorch_prefix}.bn1.running_mean': (f'{jax_prefix}', 'BatchNorm_0', 'mean', lambda x: x.numpy()),
-                f'{pytorch_prefix}.bn1.running_var': (f'{jax_prefix}', 'BatchNorm_0', 'var', lambda x: x.numpy()),
-                
-                f'{pytorch_prefix}.conv2.weight': (f'{jax_prefix}', 'Conv_1', 'kernel', convert_conv),
-                f'{pytorch_prefix}.bn2.weight': (f'{jax_prefix}', 'BatchNorm_1', 'scale', lambda x: x.numpy()),
-                f'{pytorch_prefix}.bn2.bias': (f'{jax_prefix}', 'BatchNorm_1', 'bias', lambda x: x.numpy()),
-                f'{pytorch_prefix}.bn2.running_mean': (f'{jax_prefix}', 'BatchNorm_1', 'mean', lambda x: x.numpy()),
-                f'{pytorch_prefix}.bn2.running_var': (f'{jax_prefix}', 'BatchNorm_1', 'var', lambda x: x.numpy()),
-            })
+            # First conv/bn in block
+            mapping[f'layer{layer_idx}.{block_idx}.conv1.weight'] = \
+                ('params', block_name, 'Conv_0', 'kernel', convert_conv)
+            mapping[f'layer{layer_idx}.{block_idx}.bn1.weight'] = \
+                ('params', block_name, 'BatchNorm_0', 'scale', lambda x: x.numpy())
+            mapping[f'layer{layer_idx}.{block_idx}.bn1.bias'] = \
+                ('params', block_name, 'BatchNorm_0', 'bias', lambda x: x.numpy())
+            mapping[f'layer{layer_idx}.{block_idx}.bn1.running_mean'] = \
+                ('batch_stats', block_name, 'BatchNorm_0', 'mean', lambda x: x.numpy())
+            mapping[f'layer{layer_idx}.{block_idx}.bn1.running_var'] = \
+                ('batch_stats', block_name, 'BatchNorm_0', 'var', lambda x: x.numpy())
             
-            # Shortcut layers (if they exist)
-            if f'{pytorch_prefix}.shortcut.0.weight' in pytorch_state:
-                pytorch_to_jax_mapping.update({
-                    f'{pytorch_prefix}.shortcut.0.weight': (f'{jax_prefix}', 'Conv_2', 'kernel', convert_conv),
-                    f'{pytorch_prefix}.shortcut.1.weight': (f'{jax_prefix}', 'BatchNorm_2', 'scale', lambda x: x.numpy()),
-                    f'{pytorch_prefix}.shortcut.1.bias': (f'{jax_prefix}', 'BatchNorm_2', 'bias', lambda x: x.numpy()),
-                    f'{pytorch_prefix}.shortcut.1.running_mean': (f'{jax_prefix}', 'BatchNorm_2', 'mean', lambda x: x.numpy()),
-                    f'{pytorch_prefix}.shortcut.1.running_var': (f'{jax_prefix}', 'BatchNorm_2', 'var', lambda x: x.numpy()),
-                })
+            # Second conv/bn in block
+            mapping[f'layer{layer_idx}.{block_idx}.conv2.weight'] = \
+                ('params', block_name, 'Conv_1', 'kernel', convert_conv)
+            mapping[f'layer{layer_idx}.{block_idx}.bn2.weight'] = \
+                ('params', block_name, 'BatchNorm_1', 'scale', lambda x: x.numpy())
+            mapping[f'layer{layer_idx}.{block_idx}.bn2.bias'] = \
+                ('params', block_name, 'BatchNorm_1', 'bias', lambda x: x.numpy())
+            mapping[f'layer{layer_idx}.{block_idx}.bn2.running_mean'] = \
+                ('batch_stats', block_name, 'BatchNorm_1', 'mean', lambda x: x.numpy())
+            mapping[f'layer{layer_idx}.{block_idx}.bn2.running_var'] = \
+                ('batch_stats', block_name, 'BatchNorm_1', 'var', lambda x: x.numpy())
             
-            block_idx += 1
+            # Shortcut connection (if present)
+            shortcut_key = f'layer{layer_idx}.{block_idx}.shortcut.0.weight'
+            if shortcut_key in pytorch_state:
+                mapping[shortcut_key] = \
+                    ('params', block_name, 'Conv_2', 'kernel', convert_conv)
+                mapping[f'layer{layer_idx}.{block_idx}.shortcut.1.weight'] = \
+                    ('params', block_name, 'BatchNorm_2', 'scale', lambda x: x.numpy())
+                mapping[f'layer{layer_idx}.{block_idx}.shortcut.1.bias'] = \
+                    ('params', block_name, 'BatchNorm_2', 'bias', lambda x: x.numpy())
+                mapping[f'layer{layer_idx}.{block_idx}.shortcut.1.running_mean'] = \
+                    ('batch_stats', block_name, 'BatchNorm_2', 'mean', lambda x: x.numpy())
+                mapping[f'layer{layer_idx}.{block_idx}.shortcut.1.running_var'] = \
+                    ('batch_stats', block_name, 'BatchNorm_2', 'var', lambda x: x.numpy())
+            
+            block_counter += 1
     
     # Apply the mapping
     converted_count = 0
-    for pytorch_name, pytorch_value in pytorch_state.items():
-        if pytorch_name in pytorch_to_jax_mapping:
-            mapping = pytorch_to_jax_mapping[pytorch_name]
-            
-            # Handle different mapping formats
-            if len(mapping) == 4:  # For nested paths (conv/bn layers in blocks)
-                jax_path1, jax_path2, param_name, convert_fn = mapping
-                converted_value = convert_fn(pytorch_value)
-                path = f"{jax_path1}.{jax_path2}.{param_name}"
-            elif len(mapping) == 3:  # For top-level layers
-                jax_path, param_name, convert_fn = mapping
-                converted_value = convert_fn(pytorch_value)
-                path = f"{jax_path}.{param_name}"
-            else:
-                continue
-            
-            # Actually set the parameter in the JAX params dict
-            set_param(params_dict, path, converted_value)
-            converted_count += 1
+    for pytorch_name, pytorch_tensor in pytorch_state.items():
+        if pytorch_name in mapping:
+            try:
+                *path_keys, convert_fn = mapping[pytorch_name]
+                value = convert_fn(pytorch_tensor)
+                
+                # Navigate to the correct location
+                current = params_dict
+                for key in path_keys[:-1]:
+                    if key not in current:
+                        current[key] = {}
+                    current = current[key]
+                
+                current[path_keys[-1]] = jnp.array(value)
+                converted_count += 1
+            except Exception as e:
+                print(f"Error converting {pytorch_name}: {e}")
     
-    print(f"Converted {converted_count} parameters from PyTorch to JAX")
+    print(f"Successfully converted {converted_count} parameters")
     
-    # Note: This is a simplified conversion. For production use, you'd need to:
-    # 1. Carefully match the exact parameter names between PyTorch and JAX
-    # 2. Handle the nested dictionary structure properly
-    # 3. Verify all parameters are converted correctly
+    if converted_count == 0:
+        print("ERROR: No parameters converted! Check PyTorch checkpoint keys:")
+        print(list(pytorch_state.keys()))
     
     return freeze(params_dict)
-
 
 # ---------------------------------------------------------------------
 # Evaluation Functions
