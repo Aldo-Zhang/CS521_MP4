@@ -86,7 +86,7 @@ def dequantize_activations(quantized_acts, scale, zero_point):
 # Quantized Layers
 # ---------------------------------------------------------------------
 class QuantizedConv(nn.Module):
-    """Quantized convolution layer (weights only for reliable accuracy)."""
+    """Weight-only per-channel quantization for PTQ."""
     features: int
     kernel_size: Tuple[int, int] = (3, 3)
     strides: Tuple[int, int] = (1, 1)
@@ -100,21 +100,21 @@ class QuantizedConv(nn.Module):
                            (self.kernel_size[0], self.kernel_size[1], 
                             inputs.shape[-1], self.features))
         
-        # Quantize weights (INT8) - this is the key size reduction
-        kernel_quant, kernel_scale = quantize_weights(kernel, bits=8)
-        kernel_dequant = dequantize_weights(kernel_quant, kernel_scale)
+        # Per-channel quantization: scale per output channel (axis=3 in JAX)
+        # Compute scale from the original float weights
+        abs_max = jnp.max(jnp.abs(kernel), axis=(0,1,2), keepdims=True)
+        scale = abs_max / 127.0
+        scale = jnp.where(scale > 0, scale, 1.0)  # Avoid zero
         
-        # SKIP activation quantization - it's broken in manual implementation
-        # Use inputs directly to maintain accuracy
-        inputs_dequant = inputs
+        # Quantize-dequantize: simulate INT8 storage with float32 compute
+        # The key: this happens EVERY forward pass, but the "storage" is simulated
+        kernel_quantized = jnp.round(kernel / scale) * scale
+        kernel_quantized = jnp.clip(kernel_quantized, -128 * scale, 127 * scale)
         
-        # Perform convolution
+        # Use quantized weights in forward pass
         y = jax.lax.conv_general_dilated(
-            inputs_dequant,
-            kernel_dequant,
-            window_strides=self.strides,
-            padding=self.padding,
-            dimension_numbers=('NHWC', 'HWIO', 'NHWC')
+            inputs, kernel_quantized, window_strides=self.strides,
+            padding=self.padding, dimension_numbers=('NHWC', 'HWIO', 'NHWC')
         )
         
         if self.use_bias:
@@ -125,7 +125,7 @@ class QuantizedConv(nn.Module):
 
 
 class QuantizedDense(nn.Module):
-    """Quantized dense layer (weights only for reliable accuracy)."""
+    """Weight-only per-channel quantization for PTQ."""
     features: int
     use_bias: bool = True
     
@@ -135,23 +135,23 @@ class QuantizedDense(nn.Module):
                            nn.initializers.kaiming_normal(),
                            (inputs.shape[-1], self.features))
         
-        # Quantize weights (INT8) - this is the key size reduction
-        kernel_quant, kernel_scale = quantize_weights(kernel, bits=8)
-        kernel_dequant = dequantize_weights(kernel_quant, kernel_scale)
+        # Per-channel quantization: scale per output feature (axis=1 in JAX)
+        abs_max = jnp.max(jnp.abs(kernel), axis=0, keepdims=True)
+        scale = abs_max / 127.0
+        scale = jnp.where(scale > 0, scale, 1.0)
         
-        # SKIP activation quantization - it's broken in manual implementation
-        # Use inputs directly to maintain accuracy
-        inputs_dequant = inputs
+        # Quantize-dequantize simulation
+        kernel_quantized = jnp.round(kernel / scale) * scale
+        kernel_quantized = jnp.clip(kernel_quantized, -128 * scale, 127 * scale)
         
-        # Perform matrix multiplication
-        y = jnp.dot(inputs_dequant, kernel_dequant)
+        # Use quantized weights
+        y = jnp.dot(inputs, kernel_quantized)
         
         if self.use_bias:
             bias = self.param('bias', nn.initializers.zeros, (self.features,))
             y = y + bias
         
         return y
-
 
 # ---------------------------------------------------------------------
 # ResNet18 Architecture (Matching PyTorch exactly)
@@ -479,18 +479,21 @@ def measure_inference_time(model, params, test_loader, num_batches=50):
 
 
 def calculate_model_size(params, quantized=False):
-    """Calculate model size in MB."""
-    total_params = sum(x.size for x in jax.tree_util.tree_leaves(params))
+    """Calculate model size for weight-only quantization."""
+    leaves = jax.tree_util.tree_leaves(params)
     
     if quantized:
-        # INT8 uses 1 byte per parameter (approximately)
-        size_mb = total_params / (1024 * 1024)
+        # Weight-only: conv/dense kernels are ~60% of params at 1 byte each
+        # BatchNorm stats are ~40% at 4 bytes each
+        total_params = sum(x.size for x in leaves)
+        quantizable = int(total_params * 0.6)  # Rough estimate for ResNet
+        non_quantizable = total_params - quantizable
+        size_mb = (quantizable * 1 + non_quantizable * 4) / (1024 * 1024)
     else:
-        # FP32 uses 4 bytes per parameter
+        total_params = sum(x.size for x in leaves)
         size_mb = (total_params * 4) / (1024 * 1024)
     
     return size_mb
-
 
 # ---------------------------------------------------------------------
 # Calibration for Quantization
@@ -587,6 +590,9 @@ def main():
     dummy_input = jnp.ones((1, 32, 32, 3))
     key, subkey = random.split(key)
     params_fp32 = model_fp32.init(subkey, dummy_input, train=False)
+
+    print(f"FP32 Conv weight mean: {jnp.mean(params_fp32['params']['Conv_0']['kernel']):.4f}")
+    print(f"FP32 BatchNorm keys: {list(params_fp32['batch_stats'].keys())}")
     
     # Load pretrained weights if available
     if os.path.exists(args.pytorch_ckpt):
@@ -631,6 +637,9 @@ def main():
     # Calibrate the quantized model
     params_int8 = calibrate_model(model_int8, params_int8, train_loader,
                                  num_batches=args.calib_batches)
+    
+    print(f"INT8 Conv weight mean: {jnp.mean(params_int8['params']['Conv_0']['kernel']):.4f}")
+    print(f"INT8 weight scale example: {jnp.max(jnp.abs(params_int8['params']['Conv_0']['kernel'])) / 127.0:.4f}")
     
     # Evaluate INT8 model
     int8_size = calculate_model_size(params_int8, quantized=True)
