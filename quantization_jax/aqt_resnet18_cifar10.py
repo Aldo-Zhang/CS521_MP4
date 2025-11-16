@@ -31,6 +31,15 @@ import torchvision.transforms as T
 import aqt.jax.v2.flax.aqt_flax as aqt
 import aqt.jax.v2.config as aqt_config
 
+# ---------------------------------------------------------------------
+# Make sure we can import resnet_torch.py from the project root
+# ---------------------------------------------------------------------
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))       # .../CS521_MP4/quantization_jax
+ROOT_DIR = os.path.dirname(THIS_DIR)                        # .../CS521_MP4
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 import resnet_torch  # your original PyTorch ResNet
 
 
