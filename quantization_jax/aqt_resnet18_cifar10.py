@@ -165,11 +165,16 @@ class ResNet18(nn.Module):
 
 
 def init_resnet18_params(rng, input_shape=(1, 32, 32, 3), num_classes: int = 10):
-    """Random init (used as fallback / to get the param tree structure)."""
+    """Init ResNet18 and return params + batch_stats."""
     model = ResNet18(num_classes=num_classes, dot_general=None)
     dummy_x = jnp.zeros(input_shape, jnp.float32)
-    variables = model.init(rng, dummy_x, train=True)
-    return model, variables["params"]
+
+    # train=False → BatchNorm creates batch_stats but uses running_average
+    variables = model.init(rng, dummy_x, train=False)
+
+    params = variables["params"]
+    batch_stats = variables.get("batch_stats", {})
+    return model, params, batch_stats
 
 
 # ---------------------------------------------------------------------
@@ -184,15 +189,9 @@ def load_resnet18_params_from_pytorch(
     num_classes: int = 10,
 ):
     """
-    Load pretrained PyTorch weights from resnet18_cifar10.pth into the
-    Flax ResNet18 above.
+    Load pretrained PyTorch weights into Flax ResNet18.
 
-    - Uses resnet_torch.ResNet18 to build the PyTorch model.
-    - Loads the checkpoint into that model.
-    - Maps conv / BN / linear weights into Flax param tree with
-      appropriate transposes where needed.
-    - Ignores PyTorch BN running_mean / running_var; we run with
-      train=True in JAX so BatchNorm uses the current batch stats.
+    We reuse the batch_stats from a normal Flax init.
     """
     # 1) Build PyTorch model and load weights
     pt_model = resnet_torch.ResNet18()
@@ -206,8 +205,12 @@ def load_resnet18_params_from_pytorch(
 
     sd = pt_model.state_dict()
 
-    # 2) Build Flax model to get structure (we overwrite its params)
-    model, _ = init_resnet18_params(rng, input_shape=input_shape, num_classes=num_classes)
+    # 2) Build Flax model to get params + batch_stats structure
+    model, _, batch_stats = init_resnet18_params(
+        rng,
+        input_shape=input_shape,
+        num_classes=num_classes,
+    )
 
     # 3) Helpers for mapping weights
 
@@ -280,7 +283,7 @@ def load_resnet18_params_from_pytorch(
         "bias": jnp.asarray(b),
     }
 
-    return model, params
+    return model, params, batch_stats
 
 
 # ---------------------------------------------------------------------
@@ -334,32 +337,44 @@ def params_nbytes(params) -> float:
     return total / (1024 ** 2)
 
 
-def forward_logits(model, params, x):
-    # Use train=True so BatchNorm uses per-batch statistics;
-    # we did not port running_mean/var from PyTorch.
-    return model.apply({"params": params}, x, train=True)
+def forward_logits(model, params, batch_stats, x, train: bool = False):
+    """
+    Forward pass with explicit params + batch_stats.
+
+    For evaluation we call with train=False so BatchNorm uses
+    running_average=True and does not update batch_stats.
+    """
+    variables = {
+        "params": params,
+        "batch_stats": batch_stats,
+    }
+    return model.apply(variables, x, train=train, mutable=False)
 
 
-def evaluate(model, params, testloader, max_batches: int | None = None) -> float:
+def evaluate(model, params, batch_stats, testloader, max_batches: int | None = None) -> float:
     correct = 0
     total = 0
     for i, batch in enumerate(testloader):
         if max_batches is not None and i >= max_batches:
             break
         x, y = torch_batch_to_jax(batch)
-        logits = forward_logits(model, params, x)
+        logits = forward_logits(model, params, batch_stats, x, train=False)
         preds = jnp.argmax(logits, axis=-1)
         correct += int((preds == y).sum())
         total += y.shape[0]
     return 100.0 * correct / total if total > 0 else 0.0
 
 
-def measure_inference_time(model, params, example_batch, n_iters: int = 50) -> float:
+def measure_inference_time(model, params, batch_stats, example_batch, n_iters: int = 50) -> float:
     x, _ = example_batch
 
     @jax.jit
     def run_once(x_):
-        return model.apply({"params": params}, x_, train=True)
+        variables = {
+            "params": params,
+            "batch_stats": batch_stats,
+        }
+        return model.apply(variables, x_, train=False, mutable=False)
 
     # Warmup
     run_once(x).block_until_ready()
@@ -373,12 +388,16 @@ def measure_inference_time(model, params, example_batch, n_iters: int = 50) -> f
     return (t1 - t0) * 1000.0 / n_iters  # ms per batch
 
 
-def dump_hlo(model, params, example_batch, out_path_prefix: str):
+def dump_hlo(model, params, batch_stats, example_batch, out_path_prefix: str):
     """Dump HLO text for forward pass using as_hlo_text()."""
     x, _ = example_batch
 
     def fwd(x_):
-        return model.apply({"params": params}, x_, train=True)
+        variables = {
+            "params": params,
+            "batch_stats": batch_stats,
+        }
+        return model.apply(variables, x_, train=False, mutable=False)
 
     comp = jax.xla_computation(fwd)(x)
     hlo_text = comp.as_hlo_text()
@@ -420,7 +439,7 @@ def main():
     # ---------------- FP32 model (with imported PT weights) ----------------
     print("\n=== FP32 Flax ResNet18 (imported from PyTorch) ===")
     print(f"Loading PyTorch weights from: {args.pt_ckpt_path}")
-    model_fp32, params_fp32 = load_resnet18_params_from_pytorch(
+    model_fp32, params_fp32, batch_stats_fp32 = load_resnet18_params_from_pytorch(
         rng,
         ckpt_path=args.pt_ckpt_path,
         input_shape=example_x.shape,
@@ -431,13 +450,15 @@ def main():
     print(f"FP32 param size: {size_fp32_mb:.2f} MB")
 
     acc_fp32 = evaluate(
-        model_fp32, params_fp32, testloader, max_batches=args.eval_batches
+        model_fp32, params_fp32, batch_stats_fp32,
+        testloader, max_batches=args.eval_batches
     )
     print(f"FP32 test accuracy (~{args.eval_batches} batches): {acc_fp32:.2f}%")
 
     t_fp32 = measure_inference_time(
         model_fp32,
         params_fp32,
+        batch_stats_fp32,
         example_batch=(example_x, example_y),
         n_iters=50,
     )
@@ -446,8 +467,9 @@ def main():
     dump_hlo(
         model_fp32,
         params_fp32,
+        batch_stats_fp32,
         example_batch=(example_x, example_y),
-        out_path_prefix="jax_quantization/resnet18_fp32",
+        out_path_prefix="quantization_jax/resnet18_fp32",
     )
 
     # ---------------- INT8 model (AQT on final linear) --------------------
@@ -462,17 +484,21 @@ def main():
     # We reuse the SAME params (weights) for the INT8 model
     params_int8 = params_fp32
 
+    batch_stats_int8 = batch_stats_fp32
+
     size_int8_mb = params_nbytes(params_int8)
     print(f"INT8 param size (same shapes, AQT matmul): {size_int8_mb:.2f} MB")
 
     acc_int8 = evaluate(
-        model_int8, params_int8, testloader, max_batches=args.eval_batches
+        model_int8, params_int8, batch_stats_int8,
+        testloader, max_batches=args.eval_batches
     )
     print(f"INT8 test accuracy (~{args.eval_batches} batches): {acc_int8:.2f}%")
 
     t_int8 = measure_inference_time(
         model_int8,
         params_int8,
+        batch_stats_int8,
         example_batch=(example_x, example_y),
         n_iters=50,
     )
@@ -481,10 +507,10 @@ def main():
     dump_hlo(
         model_int8,
         params_int8,
+        batch_stats_int8,
         example_batch=(example_x, example_y),
-        out_path_prefix="jax_quantization/resnet18_int8",
+        out_path_prefix="quantization_jax/resnet18_int8",
     )
-
     # ---------------- Summary ----------------
     print("\n=== Summary (JAX + AQT, ResNet18 with imported PT weights) ===")
     print(f"FP32 size      : {size_fp32_mb:.2f} MB")
