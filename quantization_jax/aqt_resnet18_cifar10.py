@@ -504,7 +504,7 @@ def save_hlo_code(model, params, dummy_input, filename):
     print(f"\n{filename} - Key differences:")
     lines = hlo_text.split('\n')
     for i, line in enumerate(lines[:200], 1):  # First 200 lines
-        if any(keyword in line for keyword in ['i8[', 'i32[', 'convert(', 'dot(', 'conv('):
+        if any(keyword in line for keyword in ['i8[', 'i32[', 'convert(', 'dot(', 'conv(']):
             print(f"  Line {i}: {line.strip()}")
 
 
