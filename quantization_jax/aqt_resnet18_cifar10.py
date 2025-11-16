@@ -389,7 +389,7 @@ def measure_inference_time(model, params, batch_stats, example_batch, n_iters: i
 
 
 def dump_hlo(model, params, batch_stats, example_batch, out_path_prefix: str):
-    """Dump HLO text for forward pass using as_hlo_text()."""
+    """Dump HLO text for forward pass using the modern JAX API."""
     x, _ = example_batch
 
     def fwd(x_):
@@ -397,10 +397,17 @@ def dump_hlo(model, params, batch_stats, example_batch, out_path_prefix: str):
             "params": params,
             "batch_stats": batch_stats,
         }
+        # For HLO we can treat this like eval mode
         return model.apply(variables, x_, train=False, mutable=False)
 
-    comp = jax.xla_computation(fwd)(x)
-    hlo_text = comp.as_hlo_text()
+    # Use jit().lower(...) instead of jax.xla_computation
+    lowered = jax.jit(fwd).lower(x)
+    try:
+        # JAX >= 0.4.16 style
+        hlo_text = lowered.compiler_ir(dialect="hlo").as_text()
+    except AttributeError:
+        # Fallback, older style
+        hlo_text = lowered.as_text()
 
     out_dir = os.path.dirname(out_path_prefix)
     if out_dir and not os.path.exists(out_dir):
