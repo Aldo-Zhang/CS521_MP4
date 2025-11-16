@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 #
-# aqt_resnet18_cifar10.py
+# quantization_jax/aqt_resnet18_cifar10.py
 #
-# Part 4: JAX + AQT quantization of a ResNet-18 for CIFAR-10.
+# JAX + AQT quantization of a ResNet-18 for CIFAR-10.
 #
-# - Flax ResNet-18 that matches resnet_torch.ResNet18.
-# - Imports pretrained PyTorch weights from resnet18_cifar10.pth.
+# - Flax ResNet-18 that matches resnet_torch.ResNet18 (CIFAR-style).
+# - Imports pretrained PyTorch weights from resnet18_cifar10.pth,
+#   including BatchNorm running_mean / running_var for every BN layer.
 # - Evaluates FP32 model in JAX (no training).
 # - Builds INT8 model using AQT for the final linear layer (same weights).
 # - Compares size, accuracy, speed.
-# - Dumps HLO before and after quantization via as_hlo_text().
+# - Dumps HLO before and after quantization via jit(...).lower(...).
 #
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ ROOT_DIR = os.path.dirname(THIS_DIR)                        # .../CS521_MP4
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-import resnet_torch  # your original PyTorch ResNet
+import resnet_torch  # your original PyTorch ResNet18 model
 
 
 # ---------------------------------------------------------------------
@@ -52,7 +53,7 @@ import resnet_torch  # your original PyTorch ResNet
 class BasicBlock(nn.Module):
     """CIFAR-10 BasicBlock matching resnet_torch.BasicBlock.
 
-    - two 3x3 convs with BN and ReLU
+    - two 3x3 convs with BN + ReLU
     - optional 1x1 conv+BN shortcut when stride != 1 or channels change
     """
     in_planes: int
@@ -60,7 +61,7 @@ class BasicBlock(nn.Module):
     stride: int = 1
 
     @nn.compact
-    def __call__(self, x, train: bool = True):
+    def __call__(self, x, train: bool = False):
         identity = x
 
         # conv1: 3x3
@@ -72,7 +73,12 @@ class BasicBlock(nn.Module):
             use_bias=False,
             name="conv1",
         )(x)
-        out = nn.BatchNorm(use_running_average=not train, name="bn1")(out)
+        out = nn.BatchNorm(
+            use_running_average=not train,
+            momentum=0.1,      # match PyTorch default
+            epsilon=1e-5,      # match PyTorch default
+            name="bn1",
+        )(out)
         out = nn.relu(out)
 
         # conv2: 3x3
@@ -84,7 +90,12 @@ class BasicBlock(nn.Module):
             use_bias=False,
             name="conv2",
         )(out)
-        out = nn.BatchNorm(use_running_average=not train, name="bn2")(out)
+        out = nn.BatchNorm(
+            use_running_average=not train,
+            momentum=0.1,
+            epsilon=1e-5,
+            name="bn2",
+        )(out)
 
         # Shortcut: identity or 1x1 conv when shape changes
         if self.stride != 1 or self.in_planes != self.planes:
@@ -98,6 +109,8 @@ class BasicBlock(nn.Module):
             )(x)
             identity = nn.BatchNorm(
                 use_running_average=not train,
+                momentum=0.1,
+                epsilon=1e-5,
                 name="shortcut_bn",
             )(identity)
 
@@ -124,7 +137,7 @@ class ResNet18(nn.Module):
     dot_general: object | None = None  # aqt.AqtDotGeneral or None
 
     @nn.compact
-    def __call__(self, x, train: bool = True):
+    def __call__(self, x, train: bool = False):
         # Expect NHWC input: [N, 32, 32, 3]
         x = nn.Conv(
             features=64,
@@ -134,7 +147,12 @@ class ResNet18(nn.Module):
             use_bias=False,
             name="conv1",
         )(x)
-        x = nn.BatchNorm(use_running_average=not train, name="bn1")(x)
+        x = nn.BatchNorm(
+            use_running_average=not train,
+            momentum=0.1,
+            epsilon=1e-5,
+            name="bn1",
+        )(x)
         x = nn.relu(x)
 
         # layer1: 64 -> 64 (2 blocks)
@@ -164,34 +182,26 @@ class ResNet18(nn.Module):
         return x
 
 
-def init_resnet18_params(rng, input_shape=(1, 32, 32, 3), num_classes: int = 10):
-    """Init ResNet18 and return params + batch_stats."""
-    model = ResNet18(num_classes=num_classes, dot_general=None)
-    dummy_x = jnp.zeros(input_shape, jnp.float32)
-
-    # train=False → BatchNorm creates batch_stats but uses running_average
-    variables = model.init(rng, dummy_x, train=False)
-
-    params = variables["params"]
-    batch_stats = variables.get("batch_stats", {})
-    return model, params, batch_stats
-
-
 # ---------------------------------------------------------------------
-# 2. PyTorch -> Flax weight import
+# 2. PyTorch -> Flax weight + BatchNorm running stats import
 # ---------------------------------------------------------------------
 
 
 def load_resnet18_params_from_pytorch(
-    rng,
     ckpt_path: str,
     input_shape=(1, 32, 32, 3),
     num_classes: int = 10,
 ):
     """
-    Load pretrained PyTorch weights into Flax ResNet18.
+    Load pretrained PyTorch weights into Flax ResNet18, including
+    BatchNorm running_mean / running_var for every BN layer.
 
-    We reuse the batch_stats from a normal Flax init.
+    - Uses resnet_torch.ResNet18 to build the PyTorch model.
+    - Loads the checkpoint into that model.
+    - Maps conv / BN / linear weights into Flax param tree with
+      appropriate transposes where needed.
+    - Fills batch_stats["..."]["mean"/"var"] from PyTorch
+      running_mean/running_var.
     """
     # 1) Build PyTorch model and load weights
     pt_model = resnet_torch.ResNet18()
@@ -205,14 +215,10 @@ def load_resnet18_params_from_pytorch(
 
     sd = pt_model.state_dict()
 
-    # 2) Build Flax model to get params + batch_stats structure
-    model, _, batch_stats = init_resnet18_params(
-        rng,
-        input_shape=input_shape,
-        num_classes=num_classes,
-    )
+    # 2) Build Flax model (we don't need its random params, just the Module)
+    model = ResNet18(num_classes=num_classes, dot_general=None)
 
-    # 3) Helpers for mapping weights
+    # 3) Helpers for mapping weights + stats
 
     def conv_weight(pt_key: str):
         """Map PyTorch conv weight [out, in, kh, kw] -> Flax [kh, kw, in, out]."""
@@ -228,52 +234,90 @@ def load_resnet18_params_from_pytorch(
             "bias": jnp.asarray(beta),
         }
 
+    def bn_stats(pt_prefix: str):
+        """Map PyTorch running_mean/var -> Flax batch_stats mean/var."""
+        running_mean = sd[f"{pt_prefix}.running_mean"].cpu().numpy()
+        running_var = sd[f"{pt_prefix}.running_var"].cpu().numpy()
+        return {
+            "mean": jnp.asarray(running_mean),
+            "var": jnp.asarray(running_var),
+        }
+
     def basic_block(pt_prefix: str):
         """
         Map one BasicBlock:
           pt_prefix = "layer1.0" etc.
+
+        Returns:
+          (block_params, block_stats)
         """
-        block = {}
+        block_params = {}
+        block_stats = {}
 
         # conv1, bn1
-        block["conv1"] = {"kernel": conv_weight(f"{pt_prefix}.conv1.weight")}
-        block["bn1"] = bn_params(f"{pt_prefix}.bn1")
+        block_params["conv1"] = {"kernel": conv_weight(f"{pt_prefix}.conv1.weight")}
+        block_params["bn1"] = bn_params(f"{pt_prefix}.bn1")
+        block_stats["bn1"] = bn_stats(f"{pt_prefix}.bn1")
 
         # conv2, bn2
-        block["conv2"] = {"kernel": conv_weight(f"{pt_prefix}.conv2.weight")}
-        block["bn2"] = bn_params(f"{pt_prefix}.bn2")
+        block_params["conv2"] = {"kernel": conv_weight(f"{pt_prefix}.conv2.weight")}
+        block_params["bn2"] = bn_params(f"{pt_prefix}.bn2")
+        block_stats["bn2"] = bn_stats(f"{pt_prefix}.bn2")
 
         # shortcut if present
         sc_conv_key = f"{pt_prefix}.shortcut.0.weight"
         if sc_conv_key in sd:
-            block["shortcut_conv"] = {"kernel": conv_weight(sc_conv_key)}
-            block["shortcut_bn"] = bn_params(f"{pt_prefix}.shortcut.1")
+            block_params["shortcut_conv"] = {"kernel": conv_weight(sc_conv_key)}
+            block_params["shortcut_bn"] = bn_params(f"{pt_prefix}.shortcut.1")
+            block_stats["shortcut_bn"] = bn_stats(f"{pt_prefix}.shortcut.1")
 
-        return block
+        return block_params, block_stats
 
-    # 4) Build the entire Flax param tree from the PyTorch state_dict
+    # 4) Build the entire Flax param tree and batch_stats tree from state_dict
 
     params = {}
+    batch_stats = {}
 
     # Top conv + BN
     params["conv1"] = {"kernel": conv_weight("conv1.weight")}
     params["bn1"] = bn_params("bn1")
+    batch_stats["bn1"] = bn_stats("bn1")
 
     # Layer1: two BasicBlocks
-    params["layer1_0"] = basic_block("layer1.0")
-    params["layer1_1"] = basic_block("layer1.1")
+    p, s = basic_block("layer1.0")
+    params["layer1_0"] = p
+    batch_stats["layer1_0"] = s
+
+    p, s = basic_block("layer1.1")
+    params["layer1_1"] = p
+    batch_stats["layer1_1"] = s
 
     # Layer2
-    params["layer2_0"] = basic_block("layer2.0")
-    params["layer2_1"] = basic_block("layer2.1")
+    p, s = basic_block("layer2.0")
+    params["layer2_0"] = p
+    batch_stats["layer2_0"] = s
+
+    p, s = basic_block("layer2.1")
+    params["layer2_1"] = p
+    batch_stats["layer2_1"] = s
 
     # Layer3
-    params["layer3_0"] = basic_block("layer3.0")
-    params["layer3_1"] = basic_block("layer3.1")
+    p, s = basic_block("layer3.0")
+    params["layer3_0"] = p
+    batch_stats["layer3_0"] = s
+
+    p, s = basic_block("layer3.1")
+    params["layer3_1"] = p
+    batch_stats["layer3_1"] = s
 
     # Layer4
-    params["layer4_0"] = basic_block("layer4.0")
-    params["layer4_1"] = basic_block("layer4.1")
+    p, s = basic_block("layer4.0")
+    params["layer4_0"] = p
+    batch_stats["layer4_0"] = s
+
+    p, s = basic_block("layer4.1")
+    params["layer4_1"] = p
+    batch_stats["layer4_1"] = s
 
     # Final linear: PyTorch [out, in] -> Flax Dense kernel [in, out]
     w = sd["linear.weight"].cpu().numpy()  # [num_classes, 512]
@@ -287,11 +331,11 @@ def load_resnet18_params_from_pytorch(
 
 
 # ---------------------------------------------------------------------
-# 3. CIFAR-10 test loader (TorchVision) and basic JAX helpers
+# 3. CIFAR-10 test loader and JAX helpers
 # ---------------------------------------------------------------------
 
 
-def make_cifar10_testloader(batch_size: int = 128, num_workers: int = 2):
+def make_cifar10_testloader(batch_size: int = 128, num_workers: int = 0):
     mean = (0.4914, 0.4822, 0.4465)
     std = (0.2023, 0.1994, 0.2010)
 
@@ -342,7 +386,7 @@ def forward_logits(model, params, batch_stats, x, train: bool = False):
     Forward pass with explicit params + batch_stats.
 
     For evaluation we call with train=False so BatchNorm uses
-    running_average=True and does not update batch_stats.
+    imported running_mean/running_var.
     """
     variables = {
         "params": params,
@@ -397,16 +441,13 @@ def dump_hlo(model, params, batch_stats, example_batch, out_path_prefix: str):
             "params": params,
             "batch_stats": batch_stats,
         }
-        # For HLO we can treat this like eval mode
         return model.apply(variables, x_, train=False, mutable=False)
 
-    # Use jit().lower(...) instead of jax.xla_computation
     lowered = jax.jit(fwd).lower(x)
     try:
-        # JAX >= 0.4.16 style
         hlo_text = lowered.compiler_ir(dialect="hlo").as_text()
     except AttributeError:
-        # Fallback, older style
+        # Older JAX fall-back
         hlo_text = lowered.as_text()
 
     out_dir = os.path.dirname(out_path_prefix)
@@ -429,7 +470,6 @@ def main():
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--eval-batches", type=int, default=50,
                         help="number of test batches for timing/accuracy")
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--pt-ckpt-path", type=str, default="resnet18_cifar10.pth",
                         help="path to PyTorch ResNet18 checkpoint")
     args = parser.parse_args()
@@ -441,13 +481,10 @@ def main():
     first_batch = next(iter(testloader))
     example_x, example_y = torch_batch_to_jax(first_batch)
 
-    rng = jax.random.PRNGKey(args.seed)
-
     # ---------------- FP32 model (with imported PT weights) ----------------
     print("\n=== FP32 Flax ResNet18 (imported from PyTorch) ===")
     print(f"Loading PyTorch weights from: {args.pt_ckpt_path}")
     model_fp32, params_fp32, batch_stats_fp32 = load_resnet18_params_from_pytorch(
-        rng,
         ckpt_path=args.pt_ckpt_path,
         input_shape=example_x.shape,
         num_classes=10,
@@ -458,7 +495,7 @@ def main():
 
     acc_fp32 = evaluate(
         model_fp32, params_fp32, batch_stats_fp32,
-        testloader, max_batches=args.eval_batches
+        testloader, max_batches=args.eval_batches,
     )
     print(f"FP32 test accuracy (~{args.eval_batches} batches): {acc_fp32:.2f}%")
 
@@ -488,9 +525,8 @@ def main():
     # Same architecture, but Dense uses AQT dot_general
     model_int8 = ResNet18(num_classes=10, dot_general=dot_gen)
 
-    # We reuse the SAME params (weights) for the INT8 model
+    # We reuse the SAME params and BN stats for the INT8 model
     params_int8 = params_fp32
-
     batch_stats_int8 = batch_stats_fp32
 
     size_int8_mb = params_nbytes(params_int8)
@@ -498,7 +534,7 @@ def main():
 
     acc_int8 = evaluate(
         model_int8, params_int8, batch_stats_int8,
-        testloader, max_batches=args.eval_batches
+        testloader, max_batches=args.eval_batches,
     )
     print(f"INT8 test accuracy (~{args.eval_batches} batches): {acc_int8:.2f}%")
 
@@ -518,6 +554,7 @@ def main():
         example_batch=(example_x, example_y),
         out_path_prefix="quantization_jax/resnet18_int8",
     )
+
     # ---------------- Summary ----------------
     print("\n=== Summary (JAX + AQT, ResNet18 with imported PT weights) ===")
     print(f"FP32 size      : {size_fp32_mb:.2f} MB")
@@ -527,8 +564,8 @@ def main():
     print(f"FP32 time (ms) : {t_fp32:.2f}")
     print(f"INT8 time (ms) : {t_int8:.2f}")
     print("HLO files:")
-    print("  jax_quantization/resnet18_fp32.hlo.txt")
-    print("  jax_quantization/resnet18_int8.hlo.txt")
+    print("  quantization_jax/resnet18_fp32.hlo.txt")
+    print("  quantization_jax/resnet18_int8.hlo.txt")
 
 
 if __name__ == "__main__":
