@@ -10,6 +10,7 @@ import pickle
 from typing import Any, Dict, List, Optional, Tuple
 import argparse
 from collections import OrderedDict
+from functools import partial
 
 import numpy as np
 import jax
@@ -25,6 +26,7 @@ import torch
 import torch.nn.functional as F_torch
 import torchvision
 import torchvision.transforms as transforms
+
 
 # Try to import AQT for advanced quantization
 try:
@@ -403,7 +405,7 @@ def convert_pytorch_weights_to_jax(pytorch_path, jax_model, dummy_input, key):
 # ---------------------------------------------------------------------
 # Evaluation Functions
 # ---------------------------------------------------------------------
-@jit
+@partial(jit, static_argnums=(1, 4))
 def compute_loss_and_accuracy(params, model, images, labels, train):
     """Compute loss and accuracy."""
     logits = model.apply(params, images, train=train)
