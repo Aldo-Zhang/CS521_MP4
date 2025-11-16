@@ -378,18 +378,21 @@ def convert_pytorch_weights_to_jax(pytorch_path, jax_model, dummy_input, key):
     for pytorch_name, pytorch_value in pytorch_state.items():
         if pytorch_name in pytorch_to_jax_mapping:
             mapping = pytorch_to_jax_mapping[pytorch_name]
-            if len(mapping) == 3:
-                jax_path, param_name, convert_fn = mapping
-                converted_value = convert_fn(pytorch_value)
-                # Build the full path
-                full_path = f'params.{jax_path}.{param_name}'
-            else:
-                # Handle nested paths
+            
+            # Handle different mapping formats
+            if len(mapping) == 4:  # For nested paths (conv/bn layers in blocks)
                 jax_path1, jax_path2, param_name, convert_fn = mapping
                 converted_value = convert_fn(pytorch_value)
-                full_path = f'params.{jax_path1}.{jax_path2}.{param_name}'
+                path = f"{jax_path1}.{jax_path2}.{param_name}"
+            elif len(mapping) == 3:  # For top-level layers
+                jax_path, param_name, convert_fn = mapping
+                converted_value = convert_fn(pytorch_value)
+                path = f"{jax_path}.{param_name}"
+            else:
+                continue
             
-            # Set the parameter (simplified - you may need to adjust based on actual structure)
+            # Actually set the parameter in the JAX params dict
+            set_param(params_dict, path, converted_value)
             converted_count += 1
     
     print(f"Converted {converted_count} parameters from PyTorch to JAX")
