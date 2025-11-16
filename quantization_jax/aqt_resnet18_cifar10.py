@@ -81,13 +81,18 @@ class QuantizedConv(nn.Module):
                             inputs.shape[-1], self.features))
         
         # Per-channel quantization (axis=3 for output channels)
-        abs_max = jnp.max(jnp.abs(kernel), axis=(0,1,2), keepdims=True)
+        # kernel shape: (H, W, in_channels, out_channels)
+        abs_max = jnp.max(jnp.abs(kernel), axis=(0, 1, 2), keepdims=True)  # shape (1,1,1,Cout)
         scale = abs_max / 127.0
-        scale = jnp.where(scale > 0, scale, 1.0)
-        
-        # Real quantization noise (happens every forward pass)
-        kernel_quant, _ = quantize_weights(kernel, bits=8)
-        kernel_dequant = dequantize_weights(kernel_quant, scale)
+        scale = jnp.where(scale > 0, scale, 1.0)  # avoid division by zero
+
+        # Quantize and dequantize using the *same per-channel scale*
+        kernel_scaled = kernel / scale
+        kernel_quant = jnp.round(kernel_scaled)
+        kernel_quant = jnp.clip(kernel_quant, -127, 127).astype(jnp.int8)
+
+        # Back to float32 for the convolution
+        kernel_dequant = kernel_quant.astype(jnp.float32) * scale
         
         # Perform convolution with quantized weights
         y = jax.lax.conv_general_dilated(
@@ -116,14 +121,18 @@ class QuantizedDense(nn.Module):
                            nn.initializers.kaiming_normal(),
                            (inputs.shape[-1], self.features))
         
-        # Per-channel quantization (axis=1 for output features)
-        abs_max = jnp.max(jnp.abs(kernel), axis=0, keepdims=True)
+        # kernel shape: (in_features, out_features)
+        abs_max = jnp.max(jnp.abs(kernel), axis=0, keepdims=True)  # shape (1, Cout)
         scale = abs_max / 127.0
         scale = jnp.where(scale > 0, scale, 1.0)
-        
-        # Real quantization noise
-        kernel_quant, _ = quantize_weights(kernel, bits=8)
-        kernel_dequant = dequantize_weights(kernel_quant, scale)
+
+        # Quantize and dequantize using the same per-channel scale
+        kernel_scaled = kernel / scale
+        kernel_quant = jnp.round(kernel_scaled)
+        kernel_quant = jnp.clip(kernel_quant, -127, 127).astype(jnp.int8)
+
+        # Back to float32 for matmul
+        kernel_dequant = kernel_quant.astype(jnp.float32) * scale
         
         # Perform matrix multiplication
         y = jnp.dot(inputs, kernel_dequant)
