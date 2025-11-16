@@ -334,7 +334,6 @@ def params_nbytes(params) -> float:
     return total / (1024 ** 2)
 
 
-@jax.jit
 def forward_logits(model, params, x):
     # Use train=True so BatchNorm uses per-batch statistics;
     # we did not port running_mean/var from PyTorch.
