@@ -387,12 +387,17 @@ def forward_logits(model, params, batch_stats, x, train: bool = False):
 
     For evaluation we call with train=False so BatchNorm uses
     imported running_mean/running_var.
+
+    AQT’s dot_general needs an RNG for "params", so we always
+    supply rngs={"params": PRNGKey(0)}. The FP32 model will ignore it,
+    the INT8 model will use it.
     """
     variables = {
         "params": params,
         "batch_stats": batch_stats,
     }
-    return model.apply(variables, x, train=train, mutable=False)
+    rngs = {"params": jax.random.PRNGKey(0)}
+    return model.apply(variables, x, train=train, mutable=False, rngs=rngs)
 
 
 def evaluate(model, params, batch_stats, testloader, max_batches: int | None = None) -> float:
@@ -418,7 +423,8 @@ def measure_inference_time(model, params, batch_stats, example_batch, n_iters: i
             "params": params,
             "batch_stats": batch_stats,
         }
-        return model.apply(variables, x_, train=False, mutable=False)
+        rngs = {"params": jax.random.PRNGKey(0)}
+        return model.apply(variables, x_, train=False, mutable=False, rngs=rngs)
 
     # Warmup
     run_once(x).block_until_ready()
@@ -441,7 +447,8 @@ def dump_hlo(model, params, batch_stats, example_batch, out_path_prefix: str):
             "params": params,
             "batch_stats": batch_stats,
         }
-        return model.apply(variables, x_, train=False, mutable=False)
+        rngs = {"params": jax.random.PRNGKey(0)}
+        return model.apply(variables, x_, train=False, mutable=False, rngs=rngs)
 
     lowered = jax.jit(fwd).lower(x)
     try:
