@@ -11,6 +11,7 @@ import pickle
 from typing import Any, Dict, List, Optional, Tuple
 import argparse
 from collections import OrderedDict
+from functools import partial
 
 import numpy as np
 import jax
