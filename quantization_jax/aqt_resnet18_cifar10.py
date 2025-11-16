@@ -385,7 +385,6 @@ def convert_pytorch_weights_to_jax(pytorch_path, jax_model, dummy_input, key):
 # ---------------------------------------------------------------------
 # Evaluation Functions
 # ---------------------------------------------------------------------
-@jit
 def compute_loss_and_accuracy(params, model, images, labels):
     """
     Compute loss and accuracy for a batch.
