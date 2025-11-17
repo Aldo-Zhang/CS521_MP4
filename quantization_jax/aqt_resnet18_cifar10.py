@@ -1,14 +1,23 @@
 """
 JAX ResNet18 Quantization - Real Performance Analysis on CPU
-This version performs actual weight quantization to measure real speed/size changes,
-with corrected size calculation and honest performance reporting.
+Note that this program works on a "fake quantization method" 
+where instead of inputing float32 and quantize it to int8,
+do math (conv, dense, linear), and then scale back, because
+it is not supported by AQT (in other word, AQT does not really
+support post training quantization, it supports doing quantization
+along with training). So what we essentially doing in this code is
+for each layer manually quantize it and quantize back, it will give
+us a sense of the memory space saved, however all layers (except for
+the last linear layer) all calculations are still in fp32, therefore
+there's no big difference between the execution speed, but it does 
+lead to a collapse of gradient, since the manually implemented quantization
+is fairly rural, and errors can accumulate through layers.
 """
 
 import os
-import sys
 import time
 import pickle
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Tuple
 import argparse
 
 import numpy as np
@@ -34,10 +43,7 @@ except ImportError:
     print("AQT not available, using manual quantization")
     USE_AQT = False
 
-
-# ---------------------------------------------------------------------
 # Manual Quantization Functions
-# ---------------------------------------------------------------------
 def quantize_weights(weights, bits=8):
     """
     Manually quantize weights to INT8 (symmetric quantization).
@@ -58,9 +64,7 @@ def dequantize_weights(quantized_weights, scale):
     return quantized_weights.astype(jnp.float32) * scale
 
 
-# ---------------------------------------------------------------------
 # Quantized Layers (Real quantization - will degrade accuracy)
-# ---------------------------------------------------------------------
 class QuantizedConv(nn.Module):
     """
     Convolution layer with real INT8 weight quantization.
@@ -81,7 +85,6 @@ class QuantizedConv(nn.Module):
                             inputs.shape[-1], self.features))
         
         # Per-channel quantization (axis=3 for output channels)
-        # kernel shape: (H, W, in_channels, out_channels)
         abs_max = jnp.max(jnp.abs(kernel), axis=(0, 1, 2), keepdims=True)  # shape (1,1,1,Cout)
         scale = abs_max / 127.0
         scale = jnp.where(scale > 0, scale, 1.0)  # avoid division by zero
@@ -144,9 +147,7 @@ class QuantizedDense(nn.Module):
         return y
 
 
-# ---------------------------------------------------------------------
 # ResNet18 Architecture
-# ---------------------------------------------------------------------
 class BasicBlock(nn.Module):
     """Basic ResNet block matching PyTorch implementation."""
     planes: int
@@ -195,7 +196,6 @@ class ResNet18(nn.Module):
         """Create a ResNet layer with specified number of blocks."""
         layers = []
         
-        # First block (may have stride and downsample)
         downsample = (stride != 1 or in_planes != planes)
         layers.append(BasicBlock(
             planes=planes,
@@ -205,7 +205,6 @@ class ResNet18(nn.Module):
             use_quantization=self.use_quantization
         ))
         
-        # Remaining blocks (stride=1, no downsample needed as planes match)
         for _ in range(1, num_blocks):
             layers.append(BasicBlock(
                 planes=planes,
@@ -261,9 +260,7 @@ class ResNet18(nn.Module):
         return out
 
 
-# ---------------------------------------------------------------------
 # PyTorch to JAX Weight Conversion
-# ---------------------------------------------------------------------
 def convert_pytorch_weights_to_jax(pytorch_path, jax_model, dummy_input, key):
     """
     Load PyTorch weights and convert them to JAX format.
@@ -284,8 +281,6 @@ def convert_pytorch_weights_to_jax(pytorch_path, jax_model, dummy_input, key):
     else:
         pytorch_state = checkpoint
     
-    # Initialize JAX model
-    print("Initializing JAX model...")
     jax_params = jax_model.init(key, dummy_input, train=False)
     
     # Convert to mutable dict for parameter assignment
@@ -391,13 +386,10 @@ def convert_pytorch_weights_to_jax(pytorch_path, jax_model, dummy_input, key):
     return freeze(params_dict)
 
 
-# ---------------------------------------------------------------------
 # Evaluation Functions
-# ---------------------------------------------------------------------
 def compute_loss_and_accuracy(params, model, images, labels):
     """
     Compute loss and accuracy for a batch.
-    Uses JIT compilation for performance.
     """
     logits = model.apply(params, images, train=False)
     loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels).mean()
@@ -438,7 +430,6 @@ def evaluate_model(model, params, test_loader):
 def measure_inference_time(model, params, test_loader, num_batches=50):
     """
     Measure average inference time over multiple batches.
-    Uses CPU execution to isolate quantization overhead.
     """
     # Force CPU execution
     with jax.default_device(jax.devices("cpu")[0]):
@@ -481,18 +472,14 @@ def calculate_model_size(params, quantized=False):
     Calculate theoretical model size accounting for quantization.
     For INT8: ~60% of params (Conv/Dense weights) are 1 byte, 
     ~40% (BatchNorm stats) remain float32 (4 bytes).
+    This is because BatchNorm is not quantized
     """
     # Count total parameters
     leaves = jax.tree_util.tree_leaves(params)
     total_params = sum(x.size for x in leaves)
     
     if quantized:
-        # Theoretical size for weight-only quantization
-        # ResNet18: ~60% weights quantizable, ~40% BN stats remain fp32
         quantizable_ratio = 0.6
-        
-        # For demonstration: calculate exact ratio from layer types
-        # This is more accurate than hardcoding 0.6
         quantizable_params = 0
         for path, value in jax.tree_util.tree_leaves_with_path(params):
             path_str = '/'.join(str(p.key) for p in path)
@@ -523,30 +510,9 @@ def save_hlo_code(model, params, dummy_input, filename):
     
     with open(filename, 'w') as f:
         f.write(hlo_text)
-    
-    # Print summary of key differences
-    print(f"\n{filename} - Key IR features:")
-    lines = hlo_text.split('\n')[:150]  # First 150 lines
-    for i, line in enumerate(lines, 1):
-        if any(keyword in line for keyword in ['i8[', 'i32[', 'f32[', 'convert(', 'dot(', 'convolution(']):
-            print(f"  Line {i:3d}: {line.strip()}")
 
 
-# ---------------------------------------------------------------------
-# Calibration for Quantization
-# ---------------------------------------------------------------------
-def calibrate_model(model, params, train_loader, num_batches=20):
-    """
-    Calibration step for quantization. For weight-only quantization,
-    this is not needed but kept for interface compatibility.
-    """
-    print(f"Skipping calibration (weight-only PTQ simulation)...")
-    return params
-
-
-# ---------------------------------------------------------------------
 # Main Function
-# ---------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="JAX ResNet18 Quantization")
     parser.add_argument("--data-root", type=str, default="./data",
@@ -654,10 +620,6 @@ def main():
             args.pytorch_ckpt, model_int8, dummy_input, subkey
         )
     
-    # Calibrate the quantized model
-    params_int8 = calibrate_model(model_int8, params_int8, train_loader,
-                                 num_batches=args.calib_batches)
-    
     # Evaluate INT8 model
     print("\n[Size Calculation]")
     int8_size = calculate_model_size(params_int8, quantized=True)
@@ -686,33 +648,6 @@ def main():
     print(f"{'Test Accuracy (%)':<25} {fp32_acc:<15.2f} {int8_acc:<15.2f} {'N/A':<10}")
     print(f"{'Inference Time (ms)':<25} {fp32_time:<15.2f} {int8_time:<15.2f} {fp32_time/int8_time:<10.2f}x")
     print("="*80)
-    
-    # Save quantized model
-    print("\n[Saving Model]")
-    with open("quantized_resnet18_jax.pkl", "wb") as f:
-        pickle.dump({'params': params_int8, 'config': {'num_classes': 10}}, f)
-    print("Quantized model saved to quantized_resnet18_jax.pkl")
-    
-    # ----------------- Assignment Answers -----------------
-    print("\n" + "="*80)
-    print("ASSIGNMENT ANSWERS")
-    print("="*80)
-    print("\nTask 1: Three bullets from quantization tasks:")
-    print(f"  1. Pretrained model size: {fp32_size:.2f} MB")
-    print(f"  2. Quantized model size: {int8_size:.2f} MB, Test accuracy: {int8_acc:.2f}%")
-    print(f"  3. Original time: {fp32_time:.2f} ms, Quantized time: {int8_time:.2f} ms")
-    
-    print("\nTask 2: Framework Comparison")
-    print("  - PyTorch PTQ: Maintains ~91% accuracy with proper calibration")
-    print("  - JAX PTQ: Accuracy collapses to ~10% (framework limitation)")
-    print("  - Size reduction is theoretical: both show ~3.7x compression")
-    
-    print("\nTask 3: HLO Analysis")
-    print("  - INT8 HLO uses i8[...] parameter types vs f32[...] in FP32")
-    print("  - Type conversion ops (convert) appear in INT8 code")
-    print("  - Vectorization opportunities exist but not exploited on CPU")
-    print("="*80)
-
 
 if __name__ == "__main__":
     main()
