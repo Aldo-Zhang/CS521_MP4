@@ -12,19 +12,17 @@ import torchvision.transforms as transforms
 from torch.ao.quantization import QuantStub, DeQuantStub, prepare, convert, QConfig
 from torch.ao.quantization.observer import MinMaxObserver
 
-# ---------------------------------------------------------------------
 # Paths: point to the folder that contains resnet_torch.py + weights
-# ---------------------------------------------------------------------
+# Currently these two files are stored at ../CS521-Spring2024-rsmooth-assignment
+# Can be modified to suffices different locations of model and weights
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSIGN_DIR = os.path.join(PROJECT_ROOT, "CS521-Spring2024-rsmooth-assignment")
 sys.path.append(ASSIGN_DIR)
 
-from resnet_torch import ResNet18  # noqa: E402
+from resnet_torch import ResNet18
 
 
-# ---------------------------------------------------------------------
 # Utilities
-# ---------------------------------------------------------------------
 def print_size_of_model(model: nn.Module, label: str = "model") -> float:
     """Save state_dict to disk and report size in MB."""
     torch.save(model.state_dict(), "temp.p")
@@ -64,9 +62,7 @@ def measure_inference_time(model: nn.Module, loader, device: torch.device,
     return (end - start) * 1000.0 / num_batches
 
 
-# ---------------------------------------------------------------------
 # Quantization wrapper
-# ---------------------------------------------------------------------
 class QuantizedResNet18(nn.Module):
     """Wrap the trained float ResNet18 with Quant/DeQuant stubs."""
 
@@ -83,9 +79,7 @@ class QuantizedResNet18(nn.Module):
         return x
 
 
-# ---------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cuda", action="store_true",
